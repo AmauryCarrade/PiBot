@@ -9,6 +9,11 @@ def _b(data):
 	"""
 	return bytes(data, 'UTF-8');
 
+def _s(data):
+	"""
+	Converts bytes to a string
+	"""
+	return str(data, 'UTF-8');
 
 class PiBot(object):
 	"""
@@ -85,13 +90,26 @@ class PiBot(object):
 		self._irc.send(_b('USER ' + self.nick + ' ' + self.nick + ' ' + self.nick + ' ' + ':A Pi-powered IRC bot\r\n'))
 		
 		
+		# A sequence of data may be sent in more than one time. This is used to store the current line.
+		# A line ends with "\r\n".
+		data = ''
+		transmission_finished = False
 		
 		while self._irc != None:
 			
-			data = str(self._irc.recv(self.BUFFER_SIZE))
+			partial_data = _s(self._irc.recv(self.BUFFER_SIZE))
 			
-			if(data == b''):
+			if(partial_data == ''):
 				continue
+			
+			data += partial_data
+			
+			if data.endswith("\r\n"):
+				transmission_finished = True
+			else:
+				transmission_finished = False
+				continue
+			
 			
 			if(self.debug): print(data + "\n")
 			
@@ -102,8 +120,6 @@ class PiBot(object):
 				if results != None and len(results.group(1)) != 0:
 					self._irc.send(_b('PONG ' + results.group(1) + '\r\n'))
 					self._logged = True
-					
-					if(self.debug): print("Registration: PONG " + results.group(1))
 				
 				continue
 			
@@ -137,7 +153,8 @@ class PiBot(object):
 					self.handle_private_message(message, user[0], user[1])
 				
 			
-			
+			if transmission_finished:
+				data = ''
 			
 
 
