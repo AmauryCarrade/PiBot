@@ -15,6 +15,20 @@ def _s(data):
 	"""
 	return str(data, 'UTF-8');
 
+
+
+class User(object):
+	"""
+	Represents an user connected to the channel.
+	"""
+	
+	def __init__(self, nick, user, host):
+		self.nick = nick
+		self.user = user
+		self.host = host
+
+
+
 class PiBot(object):
 	"""
 	The Pi IRC bot.
@@ -37,7 +51,34 @@ class PiBot(object):
 		self._logged = False
 		self._joined = False
 		
-		self._users = []
+		self._users = {}
+	
+	
+	def _get_user_from_hostmask(self, hostmask):
+		"""
+		Returns an User object from the given hostmask.
+		
+		Returns the User stored in self._users if this user is in the
+		channel watched by this bot, or a new User object if not.
+		"""
+		
+		# Hostmask format: nick!user@host
+		nick, hostname = hostmask.split('!')
+		user, host = hostname.split('@')
+		
+		if nick in self._users:
+			return self._users[nick]
+		else:
+			return User(nick, user, host)
+	
+	
+	def raw(self, raw):
+		"""
+		Sends a raw message to the IRC server.
+		raw: string.
+		"""
+		
+		self._irc.send(_b(raw + '\r\n'))
 	
 	
 	def send_message(self, message, user = None):
@@ -46,9 +87,9 @@ class PiBot(object):
 		"""
 		
 		if(user == None):
-			self._irc.send(_b('PRIVMSG ' + self.channel + ' :' + message + '\r\n'))
+			self.raw('PRIVMSG ' + self.channel + ' :' + message )
 		else:
-			self._irc.send_(b('PRIVMSG ' + user + ' :' + message + '\r\n'))
+			self.raw('PRIVMSG ' + user + ' :' + message)
 	
 	
 	def handle_private_message(self, message, user, user_host):
@@ -86,8 +127,8 @@ class PiBot(object):
 		
 		print("Connecting to the IRC server...\n")
 		
-		self._irc.send(_b('NICK ' + self.nick + '\r\n'))
-		self._irc.send(_b('USER ' + self.nick + ' ' + self.nick + ' ' + self.nick + ' ' + ':A Pi-powered IRC bot\r\n'))
+		self.raw('NICK ' + self.nick)
+		self.raw('USER ' + self.nick + ' ' + self.nick + ' ' + self.nick + ' ' + ':A Pi-powered IRC bot')
 		
 		
 		# A sequence of data may be sent in more than one time. This is used to store the current line.
@@ -114,11 +155,11 @@ class PiBot(object):
 			if(self.debug): print(data + "\n")
 			
 			
-			# Authentification
+			# Registration
 			if not self._logged:
 				results = re.search('/quote PONG ([\S]*)', data)
 				if results != None and len(results.group(1)) != 0:
-					self._irc.send(_b('PONG ' + results.group(1) + '\r\n'))
+					self.raw('PONG ' + results.group(1))
 					self._logged = True
 				
 				continue
@@ -128,15 +169,30 @@ class PiBot(object):
 			
 			# Answer to the PING
 			if data.find('PING') != -1:
-				self._irc.send(_b('PONG ' + data.split()[1] + '\r\n'))
+				self.raw('PONG ' + data.split()[1])
 			
 			# Join
-			if not self._joined:
-				if data.find("JOIN :" + self.channel) != -1:
+			if data.find("JOIN :" + self.channel) != -1:
+				# We check if the join message is our join message
+				user = self._get_user_from_hostmask(data.split(':')[1].split()[0])
+				if(user.nick == self.nick and not self._joined):
 					self._joined = True
 					print("Connected to " + self.channel + ".\n")
-				else:
-					self._irc.send(_b('JOIN ' + self.channel + '\r\n'))
+				
+				#else:
+				#	print(user.nick + " joined " + self.channel)
+				#	self._users[user.nick] = user
+			
+			# Our own join
+			if not self._joined:
+				self.raw('JOIN ' + self.channel)
+			
+			# Left
+			#if data.find('PART ' + self.channel) != -1:
+			#	user = self._get_user_from_hostmask(data.split(':')[1].split()[0])
+			#	if user.nick in self._users:
+			#		print(user.nick + " left " + self.channel)
+			#		del self._users[user.nick]
 			
 			# Messages
 			if data.find('PRIVMSG') != -1:
@@ -152,6 +208,7 @@ class PiBot(object):
 				else:
 					self.handle_private_message(message, user[0], user[1])
 				
+				continue
 			
 			if transmission_finished:
 				data = ''
