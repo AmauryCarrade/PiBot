@@ -45,7 +45,7 @@ class PiBot(object):
 		self.channel = channel
 		self.nick    = nick
 		
-		self.debug = True
+		self.debug = False
 		
 		self._irc = None
 		self._logged = False
@@ -153,6 +153,15 @@ class PiBot(object):
 			
 			
 			if(self.debug): print(data + "\n")
+			
+			
+			# If the pseudonym is already used
+			if not self._logged and data.find(self.nick + " :Nickname is already in use") != -1:
+				self.nick += "_";
+				self.raw('NICK ' + self.nick)
+				
+				print("Nick in use, trying with " + self.nick + "...")
+				continue
 			
 			
 			# Registration
