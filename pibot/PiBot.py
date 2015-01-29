@@ -37,6 +37,7 @@ class PiBot(object):
 	BOT_VERSION = "0.1-dev"
 	
 	BUFFER_SIZE = 2048
+	CTCP_CHAR = '';
 	
 	def __init__(self, network, channel, port=6667, nick="PiBot"):
 		
@@ -86,22 +87,71 @@ class PiBot(object):
 		Sends a message to the user given, or to the channel if user is None.
 		"""
 		
-		if(user == None):
-			self.raw('PRIVMSG ' + self.channel + ' :' + message )
-		else:
-			self.raw('PRIVMSG ' + user + ' :' + message)
+		if(user == None): user = self.channel
+		
+		if(self.debug): print("M-> " + message + " (to " + user + ")")
+		
+		self.raw('PRIVMSG ' + user + ' :' + message)
+	
+	
+	def send_notice(self, message, user = None):
+		"""
+		Sends a notice to the user given, or to the channel if user is None.
+		"""
+		
+		if(user == None): user = self.channel
+		
+		if(self.debug): print("N-> " + message + " (to " + user + ")")
+		
+		self.raw('NOTICE ' + user + ' :' + message)
+	
+	
+	def send_ctcp_answer(self,requestType,  message, user):
+		"""
+		Sends an answer to a CTCP request.
+		"""
+		
+		self.send_notice(self.CTCP_CHAR + requestType + " " + message + self.CTCP_CHAR, user);
 	
 	
 	def handle_private_message(self, message, user, user_host):
 		"""
-		Handles a private message received by the bot. Includes CTCP requests.
+		Handles a private message received by the bot.
+		CTCP requests are redirected from here to the self.handle_ctcp_request method.
 		
 		message: the message.
 		user: the user who sent this message.
 		user_host: the host of the user.
 		"""
 		
-		pass
+		# CTCP requests
+		if message.startswith(self.CTCP_CHAR) and message.endswith(self.CTCP_CHAR):
+			self.handle_ctcp_request(message.strip(self.CTCP_CHAR), user, user_host)
+	
+	
+	def handle_ctcp_request(self, request, user, user_host):
+		"""
+		Handles a Client-To-Client-Protocol request.
+		
+		message: the message.
+		user: the user who sent this message.
+		user_host: the host of the user.
+		"""
+		print("[Notice] CTCP request received from " + user + ": " + request + "\n")
+		
+		request = request.split()
+		requestType = request[0].strip().upper()
+		
+		# Version of the client
+		if requestType == "VERSION":
+			self.send_ctcp_answer(requestType, "PiBot version " + self.BOT_VERSION + " by AmauryPi", user)
+		
+		# Current time (timestamp)
+		elif requestType == "TIME":
+			self.send_ctcp_answer(requestType, str(time.time()), user)
+		
+		else:
+			self.send_ctcp_answer("ERRMSG", "CTCP request '" + requestType + "' not supported.", user)
 	
 	
 	def handle_room_message(self, message, user, user_host):
@@ -151,75 +201,80 @@ class PiBot(object):
 				transmission_finished = False
 				continue
 			
-			
-			if(self.debug): print(data + "\n")
-			
-			
-			# If the pseudonym is already used
-			if not self._logged and data.find(self.nick + " :Nickname is already in use") != -1:
-				self.nick += "_";
-				self.raw('NICK ' + self.nick)
+			try:
+				if(self.debug): print("<-- " + data + "\n")
 				
-				print("Nick in use, trying with " + self.nick + "...")
-				continue
-			
-			
-			# Registration
-			if not self._logged:
-				results = re.search('/quote PONG ([\S]*)', data)
-				if results != None and len(results.group(1)) != 0:
-					self.raw('PONG ' + results.group(1))
-					self._logged = True
 				
-				continue
-			
-			
-			# Here, we're registered.
-			
-			# Answer to the PING
-			if data.find('PING') != -1:
-				self.raw('PONG ' + data.split()[1])
-			
-			# Join
-			if data.find("JOIN :" + self.channel) != -1:
-				# We check if the join message is our join message
-				user = self._get_user_from_hostmask(data.split(':')[1].split()[0])
-				if(user.nick == self.nick and not self._joined):
-					self._joined = True
-					print("Connected to " + self.channel + ".\n")
+				# If the pseudonym is already used
+				if not self._logged and data.find(self.nick + " :Nickname is already in use") != -1:
+					self.nick += "_";
+					self.raw('NICK ' + self.nick)
 				
-				#else:
-				#	print(user.nick + " joined " + self.channel)
-				#	self._users[user.nick] = user
+					print("Nick in use, trying with " + self.nick + "...")
+					continue
 			
-			# Our own join
-			if not self._joined:
-				self.raw('JOIN ' + self.channel)
 			
-			# Left
-			#if data.find('PART ' + self.channel) != -1:
-			#	user = self._get_user_from_hostmask(data.split(':')[1].split()[0])
-			#	if user.nick in self._users:
-			#		print(user.nick + " left " + self.channel)
-			#		del self._users[user.nick]
-			
-			# Messages
-			if data.find('PRIVMSG') != -1:
-				# Format: ":User!UserHost PRIVMSG receiver :message\r\n"
-				# where receiver is the nick of the bot, or the name of the channel the bot is in
-				privmsg = data.split(':')
-				privmsg_meta = privmsg[1].strip().split()
-				user = privmsg_meta[0].split('!')
-				message = privmsg[2].strip()
+				# Registration
+				if not self._logged:
+					results = re.search('/quote PONG ([\S]*)', data)
+					if results != None and len(results.group(1)) != 0:
+						self.raw('PONG ' + results.group(1))
+						self._logged = True
 				
-				if privmsg_meta[2] == self.channel:
-					self.handle_room_message(message, user[0], user[1])
-				else:
-					self.handle_private_message(message, user[0], user[1])
-				
-				continue
+					continue
 			
-			if transmission_finished:
+			
+				# Here, we're registered.
+			
+				# Answer to the PING
+				if data.find('PING') != -1:
+					self.raw('PONG ' + data.split()[1])
+			
+				# Join
+				if data.find("JOIN :" + self.channel) != -1:
+					# We check if the join message is our join message
+					user = self._get_user_from_hostmask(data.split(':')[1].split()[0])
+					if(user.nick == self.nick and not self._joined):
+						self._joined = True
+						print("Connected to " + self.channel + ".\n")
+				
+					#else:
+					#	print(user.nick + " joined " + self.channel)
+					#	self._users[user.nick] = user
+			
+				# Our own join
+				if not self._joined:
+					self.raw('JOIN ' + self.channel)
+			
+				# Left
+				#if data.find('PART ' + self.channel) != -1:
+				#	user = self._get_user_from_hostmask(data.split(':')[1].split()[0])
+				#	if user.nick in self._users:
+				#		print(user.nick + " left " + self.channel)
+				#		del self._users[user.nick]
+			
+				# Messages
+				if data.find('PRIVMSG') != -1:
+					# Format: ":User!UserHost PRIVMSG receiver :message\r\n"
+					# where receiver is the nick of the bot, or the name of the channel the bot is in
+					privmsg = data.split(':')
+					privmsg_meta = privmsg[1].strip().split()
+					user = privmsg_meta[0].split('!')
+					message = privmsg[2].strip()
+				
+					if privmsg_meta[2] == self.channel:
+						self.handle_room_message(message, user[0], user[1])
+					else:
+						self.handle_private_message(message, user[0], user[1])
+				
+					continue
+			
+			except Exception as e:
+				print("[ERROR] An error occured.");
+				print(str(e));
+			
+			finally:
+				# In all cases we need to clear this
 				data = ''
 			
 
