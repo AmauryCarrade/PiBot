@@ -165,11 +165,12 @@ class PiBot(object):
 		# Hostmask format: nick!user@host
 		nick, hostname = hostmask.split('!')
 		user, host = hostname.split('@')
-		
-		if nick in self._users:
-			return self._users[nick]
-		else:
-			return User(nick, user, host)
+
+		for channel_user in self._users:
+			if channel_user.nick == nick and channel_user.user == user and channel_user.host == host:
+				return channel_user
+
+		return User(nick, user, host)
 	
 	
 	def raw(self, raw):
