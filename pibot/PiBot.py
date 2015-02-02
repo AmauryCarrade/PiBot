@@ -78,30 +78,69 @@ class PiBot(object):
 	# Standard codes and commands
 	CTCP_CHAR = ''
 
-	COMMAND_ERR_NONICKNAMEGIVEN = "431"
-	COMMAND_ERR_ERRONEUSNICKNAME = "432"
-	COMMAND_ERR_NICKNAMEINUSE = "433"
-	COMMAND_ERR_NICKCOLLISION = "436"
+	NICK_ERR_NONICKNAMEGIVEN = "431"
+	NICK_ERR_ERRONEUSNICKNAME = "432"
+	NICK_ERR_NICKNAMEINUSE = "433"
+	NICK_ERR_NICKCOLLISION = "436"
 
-	COMMAND_ERR_ALREADYREGISTRED = "462"
+	COMMAND_ERR_NEEDMOREPARAMS = "461"
+	AUTH_ERR_ALREADYREGISTRED = "462"
 
-	def __init__(self, network, channel, port=6667, nick="PiBot"):
+	JOIN_ERR_NOSUCHCHANNEL = "403"
+	JOIN_ERR_CHANNELISFULL = "471"
+	JOIN_ERR_INVITEONLYCHAN = "473"
+	JOIN_ERR_BANNEDFROMCHAN = "474"
+	JOIN_ERR_BADCHANNELKEY = "475"
+
+	JOIN_RPL_TOPIC = "332"
+
+	def __init__(self, network, channel, port=6667, nick="PiBot", channel_password=""):
 		
 		self.network = network
 		self.port    = port
 		self.channel = channel
 		self.nick    = nick
-		
+
+		self.channel_password = channel_password
+
 		self.debug = False
-		
+
 		self._irc = None
 		self._nick_set = False
 		self._logged = False
 		self._joined = False
-		
+
 		self._users = {}
-	
-	
+
+
+	# Log methods
+	def _fatal(self, error):
+		"""
+		A call to this terminates the bot.
+		"""
+		print("[FATAL] " + error + " Aborting." + "\n")
+		self._irc = None
+
+	def _warn(self, warn):
+		"""
+		A warning message.
+		"""
+		print("[WARNING] " + warn + "\n")
+
+	def _info(self, notice):
+		"""
+		A simple information.
+		"""
+		print("[INFO] " + notice + "\n")
+
+	def _debug(self, debug):
+		"""
+		A debug message, printed only if self.debug is set to True.
+		"""
+		if self.debug: print("[DEBUG] " + debug + "\n")
+
+
+
 	def _get_user_from_hostmask(self, hostmask):
 		"""
 		Returns an User object from the given hostmask.
@@ -126,7 +165,7 @@ class PiBot(object):
 		raw: string.
 		"""
 		
-		if self.debug : print("--> " + raw + "\n")
+		self._debug("--> " + raw + "\n")
 		self._irc.send(_b(raw + '\r\n'))
 	
 	
@@ -181,7 +220,7 @@ class PiBot(object):
 		user: the user who sent this message.
 		user_host: the host of the user.
 		"""
-		print("[Notice] CTCP request received from " + user + ": " + request + "\n")
+		self._info("CTCP request received from " + user + ": " + request)
 		
 		request = request.split()
 		request_type = request[0].strip().upper()
@@ -219,7 +258,7 @@ class PiBot(object):
 		self._irc = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 		self._irc.connect((self.network, self.port))
 		
-		print("Connecting to the IRC server...\n")
+		self._info("Connecting to the IRC server...\n")
 		
 		self.raw('NICK ' + self.nick)
 		self.raw('USER ' + self.nick + ' ' + self.nick + ' ' + self.nick + ' ' + ':A Pi-powered IRC bot')
@@ -246,7 +285,7 @@ class PiBot(object):
 				continue
 			
 			try:
-				if self.debug: print("<-- " + data)
+				self._debug("<-- " + data)
 
 					
 				# Ping pong (special format)
@@ -257,71 +296,72 @@ class PiBot(object):
 				
 				raw = RawMessage(data)
 				
-				print("[RAW] [COMMAND " + raw.command + "] [PARAMS " + str(raw.args) + "]")
+				self._debug("[RAW] [COMMAND " + raw.command + "] [PARAMS " + str(raw.args) + "]")
 
 
-				if raw.command == self.COMMAND_ERR_ALREADYREGISTRED:
-					print("[FATAL] User already registered! Aborting.")
-
-					self._irc = None
+				if raw.command == self.AUTH_ERR_ALREADYREGISTRED:
+					self._fatal("User already registered!")
 					continue
 
-				
-				if not self._nick_set:
-					# If the pseudonym is already used
-					if raw.command == self.COMMAND_ERR_NICKNAMEINUSE:
-						self.nick += "_"
-						self.raw('NICK ' + self.nick)
 
-						print("Nick in use, trying with " + self.nick + "...")
-						continue
+				# If the pseudonym is already used
+				if raw.command == self.NICK_ERR_NICKNAMEINUSE:
+					self.nick += "_"
+					self.raw('NICK ' + self.nick)
 
-					# If the pseudonym is invalid
-					elif raw.command == self.COMMAND_ERR_ERRONEUSNICKNAME:
-						print("[FATAL] " + self.nick + ": invalid nickname! Aborting.")
+					self._warn("Nick already used, trying with " + self.nick + "...")
+					continue
 
-						self._irc = None
-						continue
+				# If the pseudonym is invalid
+				elif raw.command == self.NICK_ERR_ERRONEUSNICKNAME:
+					self._fatal(self.nick + ": invalid nickname!")
+					continue
 
-					# If the server considers the pseudonym as empty
-					elif raw.command == self.COMMAND_ERR_NONICKNAMEGIVEN:
-						print("[FATAL] No nickname given! Aborting.")
+				# If the server considers the pseudonym as empty
+				elif raw.command == self.NICK_ERR_NONICKNAMEGIVEN:
+					self._fatal("No nickname given!")
+					continue
 
-						self._irc = None
-						continue
+				# If the server refused the connexion due to a nick conflict
+				elif raw.command == self.NICK_ERR_NICKCOLLISION:
+					self._fatal("The server answered with a NICKCOLLISION error.")
+					continue
 
-					# If the server refused the connexion due to a nick conflict
-					elif raw.command == self.COMMAND_ERR_NICKCOLLISION:
-						print("[FATAL] The server answered with a NICKCOLLISION error. Aborting.")
-
-						self._irc = None
-						continue
-
-				# If we are here, the nick was correctly set.
-				self._nick_set = True
 
 				# Join
-				if raw.command == "JOIN" and raw.args[0] == self.channel:
-					# We check if the join message is our join message
-					user = self._get_user_from_hostmask(raw.hostmask)
-					if user.nick == self.nick and not self._joined:
-						self._joined = True
-						print("Connected to " + self.channel + ".\n")
-
-					#else:
-					#	print(user.nick + " joined " + self.channel)
-					#	self._users[user.nick] = user
-
-
 				if not self._joined:
-					self.raw('JOIN ' + self.channel)
 
-				# Left
-				#if data.find('PART ' + self.channel) != -1:
-				#	user = self._get_user_from_hostmask(data.split(':')[1].split()[0])
-				#	if user.nick in self._users:
-				#		print(user.nick + " left " + self.channel)
-				#		del self._users[user.nick]
+					if raw.command == self.JOIN_ERR_NOSUCHCHANNEL:
+						self._fatal("Unable to join " + self.channel + ": the channel doesn't exists.")
+						continue
+
+					elif raw.command == self.JOIN_ERR_CHANNELISFULL:
+						self._fatal("Unable to join " + self.channel + ": this channel is full.")
+						continue
+
+					elif raw.command == self.JOIN_ERR_INVITEONLYCHAN:
+						self._fatal("Unable to join " + self.channel + ": you are not invited to this channel.")
+						continue
+
+					elif raw.command == self.JOIN_ERR_BANNEDFROMCHAN:
+						self._fatal("Unable to join " + self.channel + ": you are banned from this channel!")
+						continue
+
+					elif raw.command == self.JOIN_ERR_BADCHANNELKEY:
+						self._fatal("Unable to join " + self.channel + ": a password is required; the password given is empty or invalid.")
+						continue
+
+					elif raw.command == "JOIN" and raw.args[0] == self.channel:
+						# We check if the join message is our join message
+						user = self._get_user_from_hostmask(raw.hostmask)
+						if user.nick == self.nick and not self._joined:
+							self._joined = True
+							self._info("Connected to " + self.channel + ".")
+
+
+					if not self._joined:
+						self.raw('JOIN ' + self.channel + " " + self.channel_password)
+
 			
 				# Messages
 				if raw.command == "PRIVMSG":
