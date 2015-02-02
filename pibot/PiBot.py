@@ -1,6 +1,9 @@
+import base64
 import socket
 import time
 import uuid
+
+from enum import Enum
 
 
 def _b(data):
@@ -15,6 +18,58 @@ def _s(data):
 	"""
 	return str(data, 'UTF-8');
 
+
+class AuthMethod(Enum):
+	"""
+	Represents the authentification method used to login to IRC services.
+	"""
+	Nothing = 0
+	NickServ = 1
+	SASL = 2
+
+class Commands(object):
+	"""
+	Contains the IRC commands and reply codes
+	"""
+	COMMAND_ERR_NEEDMOREPARAMS = "461"
+
+	USER_COMMAND = "USER"
+	NICK_COMMAND = "NICK"
+	NICK_ERR_NONICKNAMEGIVEN = "431"
+	NICK_ERR_ERRONEUSNICKNAME = "432"
+	NICK_ERR_NICKNAMEINUSE = "433"
+	NICK_ERR_NICKCOLLISION = "436"
+
+	AUTH_ERR_ALREADYREGISTRED = "462"
+
+	JOIN_COMMAND = "JOIN"
+	JOIN_ERR_NOSUCHCHANNEL = "403"
+	JOIN_ERR_CHANNELISFULL = "471"
+	JOIN_ERR_INVITEONLYCHAN = "473"
+	JOIN_ERR_BANNEDFROMCHAN = "474"
+	JOIN_ERR_BADCHANNELKEY = "475"
+	JOIN_RPL_TOPIC = "332"
+
+	PART_COMMAND = "PART"
+	QUIT_COMMAND = "QUIT"
+	PRIVMSG_COMMAND = "PRIVMSG"
+
+	WHO_COMMAND = "WHO"
+	WHO_RPL_WHOREPLY = "352"
+	WHO_RPL_ENDOFWHO = "315"
+
+	NICKSERV_IDENTIFY_COMMAND = "IDENTIFY"
+	NICKSERV_RPL_LOGGEDIN = "900"
+	NICKSERV_RPL_LOGGEDOUT = "901"
+	NICKSERV_ERR_NICKLOCKED = "902"
+
+	SASL_AUTHENTICATE_COMMAND = "AUTHENTICATE"
+	SASL_RPL_SASLSUCCESS = "903"
+	SASL_ERR_SASLFAIL = "904"
+	SASL_ERR_SASLTOOLONG = "905"
+	SASL_ERR_SASLABORTED = "906"
+	SASL_ERR_SASLALREADY = "907"
+	SASL_RPL_SASLMECHS = "908"
 
 
 class User(object):
@@ -55,26 +110,32 @@ class RawMessage(object):
 			  Where parameters is a list of words separated by some spaces; the last
 			  parameter can contain spaces but with a ":" before.
 		"""
-		
-		request = data.split()
-		
-		self.hostmask = request[0].split(":")[1]
-		self.command  = request[1]
-		self.args = []
 
-		# Used to see if we need to add an argument or to append the arguments to the last one.
-		current_last_arg = False
-		if len(request) > 2:
-			for i in range(2, len(request)):
-				if not current_last_arg and not request[i].startswith(":"):
-					self.args.append(request[i])
-				
-				elif request[i].startswith(":"):
-					current_last_arg = True
-					self.args.append(request[i][1:])
-				
-				else:
-					self.args[len(self.args) - 1] += " " + request[i]
+		try:
+			request = data.split()
+
+			self.hostmask = request[0].split(":")[1]
+			self.command  = request[1]
+			self.args = []
+
+			# Used to see if we need to add an argument or to append the arguments to the last one.
+			current_last_arg = False
+			if len(request) > 2:
+				for i in range(2, len(request)):
+					if not current_last_arg and not request[i].startswith(":"):
+						self.args.append(request[i])
+
+					elif request[i].startswith(":"):
+						current_last_arg = True
+						self.args.append(request[i][1:])
+
+					else:
+						self.args[len(self.args) - 1] += " " + request[i]
+		except IndexError:
+			# Cannot parse request - invalid format, but sometime used (example, SASL authentication).
+			self.hostmask = ""
+			self.command = ""
+			self.args = []
 		
 
 class PiBot(object):
@@ -89,24 +150,6 @@ class PiBot(object):
 	# Standard codes and commands
 	CTCP_CHAR = ''
 
-	NICK_ERR_NONICKNAMEGIVEN = "431"
-	NICK_ERR_ERRONEUSNICKNAME = "432"
-	NICK_ERR_NICKNAMEINUSE = "433"
-	NICK_ERR_NICKCOLLISION = "436"
-
-	COMMAND_ERR_NEEDMOREPARAMS = "461"
-	AUTH_ERR_ALREADYREGISTRED = "462"
-
-	JOIN_ERR_NOSUCHCHANNEL = "403"
-	JOIN_ERR_CHANNELISFULL = "471"
-	JOIN_ERR_INVITEONLYCHAN = "473"
-	JOIN_ERR_BANNEDFROMCHAN = "474"
-	JOIN_ERR_BADCHANNELKEY = "475"
-	JOIN_RPL_TOPIC = "332"
-
-	WHO_RPL_WHOREPLY = "352"
-	WHO_RPL_ENDOFWHO = "315"
-
 	def __init__(self, network, channel, port=6667, nick="PiBot", channel_password=""):
 		
 		self.network = network
@@ -118,15 +161,27 @@ class PiBot(object):
 
 		self.debug = False
 
-		self._irc = None
-		self._nick_set = False
-		self._logged = False
-		self._joined = False
+		self._irc      = None
+		self._logged   = False
+		self._joined   = False
+
+		self.auth_method = AuthMethod.Nothing
+		self.auth_username = ""
+		self.auth_password = ""
+		self.nickserv_username = "NickServ"
+
+		self._sasl_auth_type_exposed  = False
+		self._sasl_auth_type_accepted = False
+
+		# Set to true when the MOTD has been received (first notice).
+		# Before, trying to send JOIN or other AUTHENTICATE commands is useless.
+		self._can_send_commands = False
 
 		self._users = set()
 
 
-	# Log methods
+	### Log methods
+
 	def _fatal(self, error):
 		"""
 		A call to this terminates the bot.
@@ -220,7 +275,7 @@ class PiBot(object):
 		user: the user who sent this message.
 		user_host: the host of the user.
 		"""
-		
+
 		# CTCP requests
 		if message.startswith(self.CTCP_CHAR) and message.endswith(self.CTCP_CHAR):
 			self.handle_ctcp_request(message.strip(self.CTCP_CHAR), user, user_host)
@@ -267,14 +322,20 @@ class PiBot(object):
 		Starts the bot.
 		Connects it to the server, and starts the main loop.
 		"""
-		
+
+		if self.auth_username == "":
+			self.auth_username = self.nick
+
 		self._irc = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 		self._irc.connect((self.network, self.port))
 		
 		self._info("Connecting to the IRC server...\n")
-		
-		self.raw('NICK ' + self.nick)
-		self.raw('USER ' + self.nick + ' ' + self.nick + ' ' + self.nick + ' ' + ':A Pi-powered IRC bot')
+
+		if self.auth_method == AuthMethod.SASL:
+			self.raw("CAP LS")
+
+		self.raw(Commands.NICK_COMMAND + ' ' + self.nick)
+		self.raw(Commands.USER_COMMAND + ' ' + self.nick + ' ' + self.nick + ' ' + self.nick + ' ' + ':A Pi-powered IRC bot')
 		
 		
 		# A sequence of data may be sent in more than one time. This is used to store the current line.
@@ -312,31 +373,61 @@ class PiBot(object):
 				#self._debug("[RAW] [COMMAND " + raw.command + "] [PARAMS " + str(raw.args) + "]")
 
 
-				if raw.command == self.AUTH_ERR_ALREADYREGISTRED:
+				if raw.command == Commands.AUTH_ERR_ALREADYREGISTRED:
 					self._fatal("User already registered!")
 					continue
 
 
+				### Authentication with SASL
+
+				if self.auth_method == AuthMethod.SASL and not self._logged:
+					if raw.command == "CAP":
+						if raw.args[1] == "LS":
+							self.raw("CAP REQ :sasl")
+						elif raw.args[2] == "sasl":
+							self.raw("AUTHENTICATE PLAIN")
+
+					elif data.startswith("AUTHENTICATE +"):
+						auth_string = base64.b64encode(_b(self.nick + '\0' + self.nick + '\0' + self.auth_password))
+						self.raw("AUTHENTICATE " + _s(auth_string))
+
+					elif raw.command == Commands.SASL_RPL_SASLSUCCESS:
+						self._info("SASL authentication successful - the bot is now logged in.")
+
+					elif raw.command == Commands.SASL_ERR_SASLFAIL:
+						self._fatal("SASL authentication failed - cannot authenticate.")
+
+					elif raw.command == Commands.SASL_ERR_SASLTOOLONG:
+						self._fatal("SASL authentication failed (too long) - cannot authenticate.")
+
+					elif raw.command == Commands.SASL_ERR_SASLABORTED:
+						self._warn("SASL authentication aborted.")
+
+					elif raw.command == Commands.SASL_ERR_SASLALREADY:
+						self._warn("SASL authentication failed - you are already logged in.")
+
+				### Nick-related checks
+
 				# If the pseudonym is already used
-				if raw.command == self.NICK_ERR_NICKNAMEINUSE:
+				if raw.command == Commands.NICK_ERR_NICKNAMEINUSE:
 					self.nick += "_"
-					self.raw('NICK ' + self.nick)
+					self.raw(Commands.NICK_COMMAND + ' ' + self.nick)
 
 					self._warn("Nick already used, trying with " + self.nick + "...")
 					continue
 
 				# If the pseudonym is invalid
-				elif raw.command == self.NICK_ERR_ERRONEUSNICKNAME:
+				elif raw.command == Commands.NICK_ERR_ERRONEUSNICKNAME:
 					self._fatal(self.nick + ": invalid nickname!")
 					continue
 
 				# If the server considers the pseudonym as empty
-				elif raw.command == self.NICK_ERR_NONICKNAMEGIVEN:
+				elif raw.command == Commands.NICK_ERR_NONICKNAMEGIVEN:
 					self._fatal("No nickname given!")
 					continue
 
 				# If the server refused the connexion due to a nick conflict
-				elif raw.command == self.NICK_ERR_NICKCOLLISION:
+				elif raw.command == Commands.NICK_ERR_NICKCOLLISION:
 					self._fatal("The server answered with a NICKCOLLISION error.")
 					continue
 
@@ -344,27 +435,27 @@ class PiBot(object):
 				# Join
 				if not self._joined:
 
-					if raw.command == self.JOIN_ERR_NOSUCHCHANNEL:
+					if raw.command == Commands.JOIN_ERR_NOSUCHCHANNEL:
 						self._fatal("Unable to join " + self.channel + ": the channel doesn't exists.")
 						continue
 
-					elif raw.command == self.JOIN_ERR_CHANNELISFULL:
+					elif raw.command == Commands.JOIN_ERR_CHANNELISFULL:
 						self._fatal("Unable to join " + self.channel + ": this channel is full.")
 						continue
 
-					elif raw.command == self.JOIN_ERR_INVITEONLYCHAN:
+					elif raw.command == Commands.JOIN_ERR_INVITEONLYCHAN:
 						self._fatal("Unable to join " + self.channel + ": you are not invited to this channel.")
 						continue
 
-					elif raw.command == self.JOIN_ERR_BANNEDFROMCHAN:
+					elif raw.command == Commands.JOIN_ERR_BANNEDFROMCHAN:
 						self._fatal("Unable to join " + self.channel + ": you are banned from this channel!")
 						continue
 
-					elif raw.command == self.JOIN_ERR_BADCHANNELKEY:
+					elif raw.command == Commands.JOIN_ERR_BADCHANNELKEY:
 						self._fatal("Unable to join " + self.channel + ": a password is required; the password given is empty or invalid.")
 						continue
 
-					elif raw.command == "JOIN" and raw.args[0] == self.channel:
+					elif raw.command == Commands.JOIN_COMMAND and raw.args[0] == self.channel:
 						# We check if the join message is our join message
 						user = self._get_user_from_hostmask(raw.hostmask)
 						if user.nick == self.nick and not self._joined:
@@ -372,17 +463,21 @@ class PiBot(object):
 							self._info("Connected to " + self.channel + ".")
 
 							# We want to list the users connected to our channel
-							self.raw("WHO " + self.channel)
+							self.raw(Commands.WHO_COMMAND + ' ' + self.channel)
+
+							# We authenticate, if needed. Here, we are sure we can do it.
+							if self.auth_method == AuthMethod.NickServ:
+								self.send_message(Commands.NICKSERV_IDENTIFY_COMMAND + ' ' + self.auth_password, self.nickserv_username)
 
 							continue
 
 
 					if not self._joined:
-						self.raw('JOIN ' + self.channel + " " + self.channel_password)
+						self.raw(Commands.JOIN_COMMAND + ' ' + self.channel + " " + self.channel_password)
 
 
 				# The results of the "WHO channel" command
-				if raw.command == self.WHO_RPL_WHOREPLY:
+				if raw.command == Commands.WHO_RPL_WHOREPLY:
 					raw_args = ""
 					for arg in raw.args:
 						raw_args += arg + " "
@@ -392,7 +487,7 @@ class PiBot(object):
 					# The informations needed for each user are just after the channel in the WHO reply
 					# format.
 					for i in range(len(args_words)):
-						if args_words[i] == self.channel and args_words[i - 2] != self.WHO_RPL_ENDOFWHO:
+						if args_words[i] == self.channel and args_words[i - 2] != Commands.WHO_RPL_ENDOFWHO:
 							user = args_words[i + 1]
 							host = args_words[i + 2]
 							nick = args_words[i + 4]
@@ -404,8 +499,21 @@ class PiBot(object):
 						else:
 							continue
 
+
+				# The result of the authentication process through NickServ
+				if self.auth_method == AuthMethod.NickServ:
+					if raw.command == Commands.NICKSERV_ERR_NICKLOCKED:
+						self._warn("The nick " + self.nick + " is currently locked - cannot authenticate.")
+					elif raw.command == Commands.NICKSERV_RPL_LOGGEDIN:
+						self._info("The bot is now logged in.")
+					elif raw.command == Commands.NICKSERV_RPL_LOGGEDOUT:
+						self._info("The bot is now logged out.")
+
+
+
+
 				# Join/leave messages (from other users)
-				if raw.command == "JOIN" and raw.args[0] == self.channel:
+				if raw.command == Commands.JOIN_COMMAND and raw.args[0] == self.channel:
 					user = self._get_user_from_hostmask(raw.hostmask)
 
 					if user.nick != self.nick:
@@ -413,7 +521,7 @@ class PiBot(object):
 
 						self._info(user.nick + " joined the channel.")
 
-				if (raw.command == "PART" and raw.args[0] == self.channel) or raw.command == "QUIT":
+				if (raw.command == Commands.PART_COMMAND and raw.args[0] == self.channel) or raw.command == Commands.QUIT_COMMAND:
 					user = self._get_user_from_hostmask(raw.hostmask)
 
 					if user.nick != self.nick and user in self._users:
@@ -424,7 +532,7 @@ class PiBot(object):
 
 			
 				# Messages
-				if raw.command == "PRIVMSG":
+				if raw.command == Commands.PRIVMSG_COMMAND:
 					user     = raw.hostmask.split('!')
 					receiver = raw.args[0]
 					message  = raw.args[1]
@@ -444,6 +552,3 @@ class PiBot(object):
 				# In all cases, if the transmission is finished, we need to clear this
 				if transmission_finished:
 					data = ''
-			
-
-
