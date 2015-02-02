@@ -1,6 +1,6 @@
 import socket
 import time
-import re
+import uuid
 
 
 def _b(data):
@@ -27,6 +27,17 @@ class User(object):
 		self.user = user
 		self.host = host
 
+		self.uuid = uuid.uuid4()
+
+	def __hash__(self):
+		return int(self.uuid)
+
+	def __eq__(self, other):
+		if not isinstance(other, self.__class__):
+			return False
+
+		return self.nick == other.nick and self.user == other.user and self.host == other.host
+
 
 class RawMessage(object):
 	"""
@@ -41,8 +52,8 @@ class RawMessage(object):
 		"""
 		data: the raw message received from the server.
 			  Format: ":{prefix} {command}[ {parameters}]\r\n"
-			  Where parameters is a list of words separated by some spaces; the last parameter can be composed by spaces but with
-			  a ":" before.
+			  Where parameters is a list of words separated by some spaces; the last
+			  parameter can contain spaces but with a ":" before.
 		"""
 		
 		request = data.split()
@@ -91,8 +102,10 @@ class PiBot(object):
 	JOIN_ERR_INVITEONLYCHAN = "473"
 	JOIN_ERR_BANNEDFROMCHAN = "474"
 	JOIN_ERR_BADCHANNELKEY = "475"
-
 	JOIN_RPL_TOPIC = "332"
+
+	WHO_RPL_WHOREPLY = "352"
+	WHO_RPL_ENDOFWHO = "315"
 
 	def __init__(self, network, channel, port=6667, nick="PiBot", channel_password=""):
 		
@@ -110,7 +123,7 @@ class PiBot(object):
 		self._logged = False
 		self._joined = False
 
-		self._users = {}
+		self._users = set()
 
 
 	# Log methods
@@ -242,10 +255,9 @@ class PiBot(object):
 		Handles a channel message received by the bot.
 		
 		message: the message.
-		user: the user who sent this message.
-		user_host: the host of the user.
+		channel_user: the channel_user who sent this message.
+		user_host: the host of the channel_user.
 		"""
-
 		pass
 	
 	
@@ -296,7 +308,7 @@ class PiBot(object):
 				
 				raw = RawMessage(data)
 				
-				self._debug("[RAW] [COMMAND " + raw.command + "] [PARAMS " + str(raw.args) + "]")
+				#self._debug("[RAW] [COMMAND " + raw.command + "] [PARAMS " + str(raw.args) + "]")
 
 
 				if raw.command == self.AUTH_ERR_ALREADYREGISTRED:
@@ -358,9 +370,56 @@ class PiBot(object):
 							self._joined = True
 							self._info("Connected to " + self.channel + ".")
 
+							# We want to list the users connected to our channel
+							self.raw("WHO " + self.channel)
+
+							continue
+
 
 					if not self._joined:
 						self.raw('JOIN ' + self.channel + " " + self.channel_password)
+
+
+				# The results of the "WHO channel" command
+				if raw.command == self.WHO_RPL_WHOREPLY:
+					raw_args = ""
+					for arg in raw.args:
+						raw_args += arg + " "
+
+					args_words = raw_args.split()
+
+					# The informations needed for each user are just after the channel in the WHO reply
+					# format.
+					for i in range(len(args_words)):
+						if args_words[i] == self.channel and args_words[i - 2] != self.WHO_RPL_ENDOFWHO:
+							user = args_words[i + 1]
+							host = args_words[i + 2]
+							nick = args_words[i + 4]
+
+							user = self._get_user_from_hostmask(nick + "!" + user + "@" + host)
+							self._users.add(user)
+
+							i += 4
+						else:
+							continue
+
+				# Join/leave messages (from other users)
+				if raw.command == "JOIN" and raw.args[0] == self.channel:
+					user = self._get_user_from_hostmask(raw.hostmask)
+
+					if user.nick != self.nick:
+						self._users.add(user)
+
+						self._info(user.nick + " joined the channel.")
+
+				if (raw.command == "PART" and raw.args[0] == self.channel) or raw.command == "QUIT":
+					user = self._get_user_from_hostmask(raw.hostmask)
+
+					if user.nick != self.nick and user in self._users:
+						self._users.remove(user)
+
+						self._info(user.nick + " left the channel.")
+
 
 			
 				# Messages
