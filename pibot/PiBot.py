@@ -28,6 +28,43 @@ class User(object):
 		self.host = host
 
 
+class RawMessage(object):
+	"""
+	Represents a request received from the server
+	
+	self.hostmask : hostmask
+	self.command : command
+	self.args : list of arguments
+	"""
+	
+	def __init__(self, data):
+		"""
+		data: the raw message received from the server.
+			  Format: ":{prefix} {command}[ {parameters}]\r\n"
+			  Where parameters is a list of words separated by some spaces; the last parameter can be composed by spaces but with
+			  a ":" before.
+		"""
+		
+		request = data.split()
+		
+		self.hostmask = request[0].split(":")[1]
+		self.command  = request[1]
+		self.args = []
+
+		# Used to see if we need to add an argument or to append the arguments to the last one.
+		current_last_arg = False
+		if len(request) > 2:
+			for i in range(2, len(request)):
+				if not current_last_arg and not request[i].startswith(":"):
+					self.args.append(request[i])
+				
+				elif request[i].startswith(":"):
+					current_last_arg = True
+					self.args.append(request[i][1:])
+				
+				else:
+					self.args[len(self.args) - 1] += " " + request[i]
+		
 
 class PiBot(object):
 	"""
@@ -36,9 +73,18 @@ class PiBot(object):
 	
 	BOT_VERSION = "0.1-dev"
 	
-	BUFFER_SIZE = 2048
-	CTCP_CHAR = '';
+	BUFFER_SIZE = 512
 	
+	# Standard codes and commands
+	CTCP_CHAR = ''
+
+	COMMAND_ERR_NONICKNAMEGIVEN = "431"
+	COMMAND_ERR_ERRONEUSNICKNAME = "432"
+	COMMAND_ERR_NICKNAMEINUSE = "433"
+	COMMAND_ERR_NICKCOLLISION = "436"
+
+	COMMAND_ERR_ALREADYREGISTRED = "462"
+
 	def __init__(self, network, channel, port=6667, nick="PiBot"):
 		
 		self.network = network
@@ -49,6 +95,7 @@ class PiBot(object):
 		self.debug = False
 		
 		self._irc = None
+		self._nick_set = False
 		self._logged = False
 		self._joined = False
 		
@@ -79,6 +126,7 @@ class PiBot(object):
 		raw: string.
 		"""
 		
+		if self.debug : print("--> " + raw + "\n")
 		self._irc.send(_b(raw + '\r\n'))
 	
 	
@@ -87,9 +135,7 @@ class PiBot(object):
 		Sends a message to the user given, or to the channel if user is None.
 		"""
 		
-		if(user == None): user = self.channel
-		
-		if(self.debug): print("M-> " + message + " (to " + user + ")")
+		if user is None : user = self.channel
 		
 		self.raw('PRIVMSG ' + user + ' :' + message)
 	
@@ -99,19 +145,17 @@ class PiBot(object):
 		Sends a notice to the user given, or to the channel if user is None.
 		"""
 		
-		if(user == None): user = self.channel
-		
-		if(self.debug): print("N-> " + message + " (to " + user + ")")
+		if user is None : user = self.channel
 		
 		self.raw('NOTICE ' + user + ' :' + message)
 	
 	
-	def send_ctcp_answer(self,requestType,  message, user):
+	def send_ctcp_answer(self, request_type,  message, user):
 		"""
 		Sends an answer to a CTCP request.
 		"""
 		
-		self.send_notice(self.CTCP_CHAR + requestType + " " + message + self.CTCP_CHAR, user);
+		self.send_notice(self.CTCP_CHAR + request_type + " " + message + self.CTCP_CHAR, user)
 	
 	
 	def handle_private_message(self, message, user, user_host):
@@ -140,18 +184,18 @@ class PiBot(object):
 		print("[Notice] CTCP request received from " + user + ": " + request + "\n")
 		
 		request = request.split()
-		requestType = request[0].strip().upper()
+		request_type = request[0].strip().upper()
 		
 		# Version of the client
-		if requestType == "VERSION":
-			self.send_ctcp_answer(requestType, "PiBot version " + self.BOT_VERSION + " by AmauryPi", user)
+		if request_type == "VERSION":
+			self.send_ctcp_answer(request_type, "PiBot version " + self.BOT_VERSION + " by AmauryPi", user)
 		
 		# Current time (timestamp)
-		elif requestType == "TIME":
-			self.send_ctcp_answer(requestType, str(time.time()), user)
+		elif request_type == "TIME" or request_type == "PING":
+			self.send_ctcp_answer(request_type, str(int(time.time() * 1000)), user)
 		
 		else:
-			self.send_ctcp_answer("ERRMSG", "CTCP request '" + requestType + "' not supported.", user)
+			self.send_ctcp_answer("ERRMSG", "CTCP request '" + request_type + "' not supported.", user)
 	
 	
 	def handle_room_message(self, message, user, user_host):
@@ -162,7 +206,7 @@ class PiBot(object):
 		user: the user who sent this message.
 		user_host: the host of the user.
 		"""
-		
+
 		pass
 	
 	
@@ -186,11 +230,11 @@ class PiBot(object):
 		data = ''
 		transmission_finished = False
 		
-		while self._irc != None:
+		while self._irc is not None:
 			
 			partial_data = _s(self._irc.recv(self.BUFFER_SIZE))
 			
-			if(partial_data == ''):
+			if partial_data == '':
 				continue
 			
 			data += partial_data
@@ -202,50 +246,76 @@ class PiBot(object):
 				continue
 			
 			try:
-				if(self.debug): print("<-- " + data + "\n")
-				
-				
-				# If the pseudonym is already used
-				if not self._logged and data.find(self.nick + " :Nickname is already in use") != -1:
-					self.nick += "_";
-					self.raw('NICK ' + self.nick)
-				
-					print("Nick in use, trying with " + self.nick + "...")
-					continue
-			
-			
-				# Registration
-				if not self._logged:
-					results = re.search('/quote PONG ([\S]*)', data)
-					if results != None and len(results.group(1)) != 0:
-						self.raw('PONG ' + results.group(1))
-						self._logged = True
-				
-					continue
-			
-			
-				# Here, we're registered.
-			
-				# Answer to the PING
-				if data.find('PING') != -1:
+				if self.debug: print("<-- " + data)
+
+					
+				# Ping pong (special format)
+				if data.startswith("PING "):
 					self.raw('PONG ' + data.split()[1])
-			
+					continue
+				
+				
+				raw = RawMessage(data)
+				
+				print("[RAW] [COMMAND " + raw.command + "] [PARAMS " + str(raw.args) + "]")
+
+
+				if raw.command == self.COMMAND_ERR_ALREADYREGISTRED:
+					print("[FATAL] User already registered! Aborting.")
+
+					self._irc = None
+					continue
+
+				
+				if not self._nick_set:
+					# If the pseudonym is already used
+					if raw.command == self.COMMAND_ERR_NICKNAMEINUSE:
+						self.nick += "_"
+						self.raw('NICK ' + self.nick)
+
+						print("Nick in use, trying with " + self.nick + "...")
+						continue
+
+					# If the pseudonym is invalid
+					elif raw.command == self.COMMAND_ERR_ERRONEUSNICKNAME:
+						print("[FATAL] " + self.nick + ": invalid nickname! Aborting.")
+
+						self._irc = None
+						continue
+
+					# If the server considers the pseudonym as empty
+					elif raw.command == self.COMMAND_ERR_NONICKNAMEGIVEN:
+						print("[FATAL] No nickname given! Aborting.")
+
+						self._irc = None
+						continue
+
+					# If the server refused the connexion due to a nick conflict
+					elif raw.command == self.COMMAND_ERR_NICKCOLLISION:
+						print("[FATAL] The server answered with a NICKCOLLISION error. Aborting.")
+
+						self._irc = None
+						continue
+
+				# If we are here, the nick was correctly set.
+				self._nick_set = True
+
 				# Join
-				if data.find("JOIN :" + self.channel) != -1:
+				if raw.command == "JOIN" and raw.args[0] == self.channel:
 					# We check if the join message is our join message
-					user = self._get_user_from_hostmask(data.split(':')[1].split()[0])
-					if(user.nick == self.nick and not self._joined):
+					user = self._get_user_from_hostmask(raw.hostmask)
+					if user.nick == self.nick and not self._joined:
 						self._joined = True
 						print("Connected to " + self.channel + ".\n")
-				
+
 					#else:
 					#	print(user.nick + " joined " + self.channel)
 					#	self._users[user.nick] = user
-			
-				# Our own join
+
+
 				if not self._joined:
 					self.raw('JOIN ' + self.channel)
-			
+
 				# Left
 				#if data.find('PART ' + self.channel) != -1:
 				#	user = self._get_user_from_hostmask(data.split(':')[1].split()[0])
@@ -254,28 +324,26 @@ class PiBot(object):
 				#		del self._users[user.nick]
 			
 				# Messages
-				if data.find('PRIVMSG') != -1:
-					# Format: ":User!UserHost PRIVMSG receiver :message\r\n"
-					# where receiver is the nick of the bot, or the name of the channel the bot is in
-					privmsg = data.split(':')
-					privmsg_meta = privmsg[1].strip().split()
-					user = privmsg_meta[0].split('!')
-					message = privmsg[2].strip()
-				
-					if privmsg_meta[2] == self.channel:
+				if raw.command == "PRIVMSG":
+					user     = raw.hostmask.split('!')
+					receiver = raw.args[0]
+					message  = raw.args[1]
+
+					if receiver == self.channel:
 						self.handle_room_message(message, user[0], user[1])
 					else:
 						self.handle_private_message(message, user[0], user[1])
-				
+
 					continue
 			
 			except Exception as e:
-				print("[ERROR] An error occured.");
-				print(str(e));
+				print("[ERROR] An error occurred.")
+				print(repr(e))
 			
 			finally:
-				# In all cases we need to clear this
-				data = ''
+				# In all cases, if the transmission is finished, we need to clear this
+				if transmission_finished:
+					data = ''
 			
 
 
