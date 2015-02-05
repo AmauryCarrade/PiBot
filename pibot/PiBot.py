@@ -5,23 +5,104 @@ import uuid
 
 from enum import Enum
 
+__all__ = ['PiBot', 'Commands', 'RawMessage', 'User', 'event_handler', 'Event', 'Hook']
+
 
 def _b(data):
 	"""
 	Converts data to something that can be used by a buffer (some bytes).
 	"""
-	return bytes(data, 'UTF-8');
+	return bytes(data, 'UTF-8')
 
 def _s(data):
 	"""
 	Converts bytes to a string
 	"""
-	return str(data, 'UTF-8');
+	return str(data, 'UTF-8')
+
+
+
+class Hook(Enum):
+	"""
+	Represents the hooks a plugin can listen.
+	"""
+
+	# Fired when a raw message is received.
+	RAW_MESSAGE_RECEIVED = "hook.received.raw_message"
+
+	# Fired when a message is sent into the channel watched by this bot.
+	CHANNEL_MESSAGE_RECEIVED = "hook.received.channel_message"
+
+	# Fired when a private message is sent to the bot.
+	PRIVATE_MESSAGE_RECEIVED = "hook.received.channel_message"
+
+	# Fired when the bot receive a message either from the channel or a specific user (private message).
+	# Do not fires for CTCP requests.
+	MESSAGE_RECEIVED = "hook.received.message"
+
+	# Fired when a CTCP request is received.
+	CTCP_REQUEST_RECEIVED = "hook.received.ctcp_request"
+
+
+class Event(object):
+	"""
+	Class used to store the data passed to the methods
+	"""
+	pass
+
+# Stores the addons.
+_addons = dict()
+
+for the_hook in Hook:
+	_addons[the_hook] = set()
+
+
+def event_handler(hook):
+	"""
+	Registers a function as an event handler for the Pi IRC Bot.
+	The function needs to accept a single argument, an Event class containing attributes with some data
+	about the event received.
+	See the Hook enum for a list of these arguments per hook.
+
+	:param hook: The hook this function will watch for.
+	"""
+	def decorator(handler):
+		"""
+		:param handler: function
+		"""
+
+		# The event handler is registered
+		_addons[hook].add(handler)
+
+		def wrapper(ev, bot):
+			"""
+			:param ev: An Event object.
+			:param bot: The bot (PiBot object) who called this function.
+			:return:
+			"""
+			return handler(ev, bot)
+
+		return wrapper
+
+	return decorator
+
+def call_event(hook, event, bot):
+	"""
+	Calls all the functions registered for the given hook, passing the same event object to all these functions.
+
+	:param hook: The hook.
+	:param event: The Event object.
+	:param bot: The bot.
+	:return:
+	"""
+	for function in _addons[hook]:
+		function(event, bot)
+
 
 
 class AuthMethod(Enum):
 	"""
-	Represents the authentification method used to login to IRC services.
+	Represents the authentication method used to login to IRC services.
 	"""
 	Nothing = 0
 	NickServ = 1
@@ -279,33 +360,55 @@ class PiBot(object):
 		# CTCP requests
 		if message.startswith(self.CTCP_CHAR) and message.endswith(self.CTCP_CHAR):
 			self.handle_ctcp_request(message.strip(self.CTCP_CHAR), user, user_host)
+
+		# Normal private messages
+		else:
+			event = Event()
+			event.message = message
+			event.user = user
+
+			call_event(Hook.CHANNEL_MESSAGE_RECEIVED, event, self)
+			call_event(Hook.MESSAGE_RECEIVED, event, self)
 	
 	
 	def handle_ctcp_request(self, request, user, user_host):
 		"""
 		Handles a Client-To-Client-Protocol request.
-		
+
 		message: the message.
 		user: the user who sent this message.
 		user_host: the host of the user.
 		"""
 		self._info("CTCP request received from " + user + ": " + request)
-		
+
 		request = request.split()
 		request_type = request[0].strip().upper()
+
+		answer = ""
+		answer_type = request_type
 		
 		# Version of the client
 		if request_type == "VERSION":
-			self.send_ctcp_answer(request_type, "PiBot version " + self.BOT_VERSION + " by AmauryPi. "
-			                                    "Source code available on GitHub: https://github.com/AmauryCarrade/PiBot", user)
+			answer = "PiBot version " + self.BOT_VERSION + " by AmauryPi. " \
+			         "Source code available on GitHub: https://github.com/AmauryCarrade/PiBot"
 		
 		# Current time (timestamp)
 		elif request_type == "TIME" or request_type == "PING":
-			self.send_ctcp_answer(request_type, str(int(time.time() * 1000)), user)
+			answer = str(int(time.time() * 1000))
 		
 		else:
-			self.send_ctcp_answer("ERRMSG", "CTCP request '" + request_type + "' not supported.", user)
-	
+			answer = "CTCP request '" + request_type + "' not supported."
+			answer_type = "ERRMSG"
+
+		event = Event()
+		event.request_type = request_type
+		event.answer = answer
+		event.answer_type = answer_type
+
+		call_event(Hook.CTCP_REQUEST_RECEIVED, event, self)
+
+		if answer is not None:
+			self.send_ctcp_answer(event.answer_type, event.answer, user)
 	
 	def handle_room_message(self, message, user, user_host):
 		"""
@@ -315,7 +418,12 @@ class PiBot(object):
 		channel_user: the channel_user who sent this message.
 		user_host: the host of the channel_user.
 		"""
-		pass
+		event = Event()
+		event.message = message
+		event.user = user
+
+		call_event(Hook.CHANNEL_MESSAGE_RECEIVED, event, self)
+		call_event(Hook.MESSAGE_RECEIVED, event, self)
 	
 	
 	def launch(self):
@@ -370,7 +478,12 @@ class PiBot(object):
 				
 				
 				raw = RawMessage(data)
-				
+
+				event = Event()
+				event.raw = raw
+				call_event(Hook.RAW_MESSAGE_RECEIVED, event, self)
+
+
 				#self._debug("[RAW] [COMMAND " + raw.command + "] [PARAMS " + str(raw.args) + "]")
 
 
