@@ -1,9 +1,12 @@
 import base64
 import socket
 import time
-import uuid
 
-from enum import Enum
+from .Event import *
+from .User import *
+from .RawMessage import *
+from .Commands import *
+from .EventsManager import *
 
 __all__ = ['PiBot', 'Commands', 'RawMessage', 'User', 'event_handler', 'Event', 'Hook']
 
@@ -22,84 +25,6 @@ def _s(data):
 
 
 
-class Hook(Enum):
-	"""
-	Represents the hooks a plugin can listen.
-	"""
-
-	# Fired when a raw message is received.
-	RAW_MESSAGE_RECEIVED = "hook.received.raw_message"
-
-	# Fired when a message is sent into the channel watched by this bot.
-	CHANNEL_MESSAGE_RECEIVED = "hook.received.channel_message"
-
-	# Fired when a private message is sent to the bot.
-	PRIVATE_MESSAGE_RECEIVED = "hook.received.channel_message"
-
-	# Fired when the bot receive a message either from the channel or a specific user (private message).
-	# Do not fires for CTCP requests.
-	MESSAGE_RECEIVED = "hook.received.message"
-
-	# Fired when a CTCP request is received.
-	CTCP_REQUEST_RECEIVED = "hook.received.ctcp_request"
-
-
-class Event(object):
-	"""
-	Class used to store the data passed to the methods
-	"""
-	pass
-
-# Stores the addons.
-_addons = dict()
-
-for the_hook in Hook:
-	_addons[the_hook] = set()
-
-
-def event_handler(hook):
-	"""
-	Registers a function as an event handler for the Pi IRC Bot.
-	The function needs to accept a single argument, an Event class containing attributes with some data
-	about the event received.
-	See the Hook enum for a list of these arguments per hook.
-
-	:param hook: The hook this function will watch for.
-	"""
-	def decorator(handler):
-		"""
-		:param handler: function
-		"""
-
-		# The event handler is registered
-		_addons[hook].add(handler)
-
-		def wrapper(ev, bot):
-			"""
-			:param ev: An Event object.
-			:param bot: The bot (PiBot object) who called this function.
-			:return:
-			"""
-			return handler(ev, bot)
-
-		return wrapper
-
-	return decorator
-
-def call_event(hook, event, bot):
-	"""
-	Calls all the functions registered for the given hook, passing the same event object to all these functions.
-
-	:param hook: The hook.
-	:param event: The Event object.
-	:param bot: The bot.
-	:return:
-	"""
-	for function in _addons[hook]:
-		function(event, bot)
-
-
-
 class AuthMethod(Enum):
 	"""
 	Represents the authentication method used to login to IRC services.
@@ -108,116 +33,6 @@ class AuthMethod(Enum):
 	NickServ = 1
 	SASL = 2
 
-class Commands(object):
-	"""
-	Contains the IRC commands and reply codes
-	"""
-	COMMAND_ERR_NEEDMOREPARAMS = "461"
-
-	USER_COMMAND = "USER"
-	NICK_COMMAND = "NICK"
-	NICK_ERR_NONICKNAMEGIVEN = "431"
-	NICK_ERR_ERRONEUSNICKNAME = "432"
-	NICK_ERR_NICKNAMEINUSE = "433"
-	NICK_ERR_NICKCOLLISION = "436"
-
-	AUTH_ERR_ALREADYREGISTRED = "462"
-
-	JOIN_COMMAND = "JOIN"
-	JOIN_ERR_NOSUCHCHANNEL = "403"
-	JOIN_ERR_CHANNELISFULL = "471"
-	JOIN_ERR_INVITEONLYCHAN = "473"
-	JOIN_ERR_BANNEDFROMCHAN = "474"
-	JOIN_ERR_BADCHANNELKEY = "475"
-	JOIN_RPL_TOPIC = "332"
-
-	PART_COMMAND = "PART"
-	QUIT_COMMAND = "QUIT"
-	PRIVMSG_COMMAND = "PRIVMSG"
-
-	WHO_COMMAND = "WHO"
-	WHO_RPL_WHOREPLY = "352"
-	WHO_RPL_ENDOFWHO = "315"
-
-	NICKSERV_IDENTIFY_COMMAND = "IDENTIFY"
-	NICKSERV_RPL_LOGGEDIN = "900"
-	NICKSERV_RPL_LOGGEDOUT = "901"
-	NICKSERV_ERR_NICKLOCKED = "902"
-
-	SASL_AUTHENTICATE_COMMAND = "AUTHENTICATE"
-	SASL_RPL_SASLSUCCESS = "903"
-	SASL_ERR_SASLFAIL = "904"
-	SASL_ERR_SASLTOOLONG = "905"
-	SASL_ERR_SASLABORTED = "906"
-	SASL_ERR_SASLALREADY = "907"
-	SASL_RPL_SASLMECHS = "908"
-
-
-class User(object):
-	"""
-	Represents an user connected to the channel.
-	"""
-	
-	def __init__(self, nick, user, host):
-		self.nick = nick
-		self.user = user
-		self.host = host
-
-		self.uuid = uuid.uuid4()
-
-	def __hash__(self):
-		return int(self.uuid)
-
-	def __eq__(self, other):
-		if not isinstance(other, self.__class__):
-			return False
-
-		return self.nick == other.nick and self.user == other.user and self.host == other.host
-
-
-class RawMessage(object):
-	"""
-	Represents a request received from the server
-	
-	self.hostmask : hostmask
-	self.command : command
-	self.args : list of arguments
-	"""
-	
-	def __init__(self, data):
-		"""
-		data: the raw message received from the server.
-			  Format: ":{prefix} {command}[ {parameters}]\r\n"
-			  Where parameters is a list of words separated by some spaces; the last
-			  parameter can contain spaces but with a ":" before.
-		"""
-
-		try:
-			request = data.split()
-
-			self.hostmask = request[0].split(":")[1]
-			self.command  = request[1]
-			self.args = []
-
-			# Used to see if we need to add an argument or to append the arguments to the last one.
-			current_last_arg = False
-			if len(request) > 2:
-				for i in range(2, len(request)):
-					if not current_last_arg and not request[i].startswith(":"):
-						self.args.append(request[i])
-
-					elif request[i].startswith(":"):
-						current_last_arg = True
-						self.args.append(request[i][1:])
-
-					else:
-						self.args[len(self.args) - 1] += " " + request[i]
-		except IndexError:
-			# Cannot parse request - invalid format, but sometime used (example, SASL authentication).
-			self.hostmask = ""
-			self.command = ""
-			self.args = []
-		
 
 class PiBot(object):
 	"""
@@ -367,7 +182,7 @@ class PiBot(object):
 			event.message = message
 			event.user = user
 
-			call_event(Hook.CHANNEL_MESSAGE_RECEIVED, event, self)
+			call_event(Hook.PRIVATE_MESSAGE_RECEIVED, event, self)
 			call_event(Hook.MESSAGE_RECEIVED, event, self)
 	
 	
