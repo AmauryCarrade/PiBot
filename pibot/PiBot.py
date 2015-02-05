@@ -296,7 +296,8 @@ class PiBot(object):
 		
 		# Version of the client
 		if request_type == "VERSION":
-			self.send_ctcp_answer(request_type, "PiBot version " + self.BOT_VERSION + " by AmauryPi", user)
+			self.send_ctcp_answer(request_type, "PiBot version " + self.BOT_VERSION + " by AmauryPi. "
+			                                    "Source code available on GitHub: https://github.com/AmauryCarrade/PiBot", user)
 		
 		# Current time (timestamp)
 		elif request_type == "TIME" or request_type == "PING":
