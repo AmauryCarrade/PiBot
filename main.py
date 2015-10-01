@@ -1,12 +1,6 @@
-from pibot.PiBot import PiBot, Hook, event_handler
+from pibot import PiBot
 
-@event_handler(Hook.CHANNEL_MESSAGE_RECEIVED)
-def on_message(ev, bot):
-	# do something
-	pass
-
-
-dearBot = PiBot("irc.sigpipe.me", "#pi")
+dearBot = PiBot.PiBot(network="irc.zcraft.fr")
 
 dearBot.debug = True
-dearBot.launch()
+dearBot.run()
